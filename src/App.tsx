@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { PoemState, createLineId } from './poemModel';
-import { parseCommand, getCommandDescription } from './parseCommand';
-import { applyCommand } from './applyCommand';
+import { getPoemEditsFromLLM, getLlmEditDescription } from './llmService';
+import { applyLlmEdits } from './applyLlmEdits';
 import { parsePoemFromText } from './parsePoem';
 import './App.css';
 
@@ -37,6 +37,7 @@ function App() {
   const [historyIndex, setHistoryIndex] = useState(0);
   const [showPasteDialog, setShowPasteDialog] = useState(false);
   const [pasteText, setPasteText] = useState("");
+  const [isLoadingLlm, setIsLoadingLlm] = useState(false);
   
   const recognitionRef = useRef<any>(null);
   const spacebarPressedRef = useRef(false);
@@ -105,39 +106,54 @@ function App() {
       const transcript = event.results[0][0].transcript;
       console.log('[SpeechRecognition] Transcript:', transcript);
       setLastRecognizedText(transcript);
+      setError("");
+      setLastCommandDescription("");
+      setIsLoadingLlm(true);
       
-      const command = parseCommand(transcript);
-      if (command) {
-        console.log('[SpeechRecognition] Parsed command:', command);
-        setLastCommandDescription(getCommandDescription(command));
-        setError("");
+      // Get current state and call LLM
+      setPoemState(prevState => {
+        const currentState = prevState;
         
-        setPoemState(prevState => {
-          const result = applyCommand(prevState, command);
-          if (result.error) {
-            console.error('[SpeechRecognition] Command error:', result.error);
-            setError(result.error);
-            return prevState;
-          }
-          
-          console.log('[SpeechRecognition] Command applied successfully');
-          // Add to history - update both atomically using functional updates
-          setHistory(prevHistory => {
-            const currentIndex = historyIndexRef.current;
-            const newHistory = prevHistory.slice(0, currentIndex + 1);
-            newHistory.push(result.state);
-            setHistoryIndex(newHistory.length - 1);
-            historyIndexRef.current = newHistory.length - 1;
-            return newHistory;
+        // Call LLM to get edits (async)
+        getPoemEditsFromLLM(currentState, transcript)
+          .then(llmResponse => {
+            console.log('[LLM] Response received:', llmResponse);
+            const description = getLlmEditDescription(llmResponse);
+            setLastCommandDescription(description);
+            
+            // Apply the edits
+            const result = applyLlmEdits(currentState, llmResponse);
+            
+            if (result.error) {
+              console.error('[LLM] Edit error:', result.error);
+              setError(result.error);
+              setIsLoadingLlm(false);
+              return;
+            }
+            
+            console.log('[LLM] Edits applied successfully');
+            
+            // Add to history and update state
+            setHistory(prevHistory => {
+              const currentIndex = historyIndexRef.current;
+              const newHistory = prevHistory.slice(0, currentIndex + 1);
+              newHistory.push(result.state);
+              setHistoryIndex(newHistory.length - 1);
+              historyIndexRef.current = newHistory.length - 1;
+              return newHistory;
+            });
+            setPoemState(result.state);
+            
+            setIsLoadingLlm(false);
+          })
+          .catch(error => {
+            console.error('[LLM] Error:', error);
+            setError(`שגיאה בזמן קריאה למנוע העריכה: ${error instanceof Error ? error.message : String(error)}`);
+            setIsLoadingLlm(false);
           });
-          
-          return result.state;
-        });
-      } else {
-        console.warn('[SpeechRecognition] Could not parse command from transcript:', transcript);
-        setError("לא הצלחתי להבין את הפקודה");
-        setLastCommandDescription("");
-      }
+        
+        return currentState; // Return unchanged state, LLM will update it
+      });
     };
 
     recognition.onerror = (event: any) => {
@@ -591,6 +607,11 @@ function App() {
         <div className="status-item">
           <strong>פקודה:</strong> {lastCommandDescription || "—"}
         </div>
+        {isLoadingLlm && (
+          <div className="status-item loading">
+            <strong>מעבד עם מנוע עריכה...</strong>
+          </div>
+        )}
         {error && (
           <div className="status-item error">
             <strong>שגיאה:</strong> {error}
